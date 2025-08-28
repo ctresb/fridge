@@ -124,6 +124,10 @@
 				font-size: clamp(18px, 2.5vw, 14px);
 				cursor: pointer;
 				box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+				position: fixed;
+				top: 12px;
+				right: 12px;
+				z-index: 10;
 			}
 
 			/* Respect reduced motion */
@@ -165,11 +169,16 @@
 				const clicksEl = document.getElementById('clicks');
 				const openTimeEl = document.getElementById('openTime');
 				const stateEl = document.getElementById('state');
+				const muteBtn = document.getElementById('muteBtn');
 
 				// Volume settings (0.0 to 1.0)
 				const VOLUME_OPEN = 0.8;
 				const VOLUME_CLOSE = 0.8;
 				const VOLUME_BUZZ = 0.05;
+
+				// Mute state (must be declared early)
+				const MUTE_KEY = 'fridge-muted';
+				let muted = (typeof localStorage !== 'undefined' && localStorage.getItem(MUTE_KEY) === '1');
 
 				// Sounds
 				const openSnd = new Audio('open.mp3');
@@ -178,11 +187,37 @@
 				closeSnd.preload = 'auto';
 				openSnd.volume = VOLUME_OPEN;
 				closeSnd.volume = VOLUME_CLOSE;
+				openSnd.muted = muted;
+				closeSnd.muted = muted;
+
+				// Mute functions
+				function applyMuteUI() {
+					if (!muteBtn) return;
+					muteBtn.textContent = muted ? 'Unmute' : 'Mute';
+					muteBtn.setAttribute('aria-pressed', muted ? 'true' : 'false');
+				}
+
+				function setMuted(flag) {
+					muted = !!flag;
+					openSnd.muted = muted;
+					closeSnd.muted = muted;
+					if (audioCtx && masterGain) {
+						try {
+							const target = muted ? 0 : 1;
+							masterGain.gain.setTargetAtTime(target, audioCtx.currentTime, 0.01);
+						} catch (_) {
+							masterGain.gain.value = muted ? 0 : 1;
+						}
+					}
+					try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); } catch (_) {}
+					applyMuteUI();
+				}
 
 				// Web Audio context for smoother, crossfaded buzz loop
 				const BUZZ_CROSSFADE = 0.12; // seconds of overlap to blend seams
 				let audioCtx = null;
 				let buzzBuffer = null;
+				let masterGain = null; // master gain for global mute
 				const buzzActiveSources = new Set();
 
 				async function ensureAudioCtx() {
@@ -191,6 +226,11 @@
 					}
 					if (audioCtx.state === 'suspended') {
 						try { await audioCtx.resume(); } catch (_) {}
+					}
+					if (!masterGain && audioCtx) {
+						masterGain = audioCtx.createGain();
+						masterGain.gain.value = muted ? 0 : 1;
+						masterGain.connect(audioCtx.destination);
 					}
 				}
 
@@ -215,7 +255,7 @@
 					gain.gain.linearRampToValueAtTime(0, endTime);
 
 					src.connect(gain);
-					gain.connect(audioCtx.destination);
+					gain.connect(masterGain || audioCtx.destination);
 					src.start(atTime);
 					buzzActiveSources.add(src);
 					src.onended = () => buzzActiveSources.delete(src);
@@ -299,6 +339,12 @@
 					}
 					if (socket) socket.emit('requestToggle');
 				});
+
+				// Wire up mute button
+				if (muteBtn) {
+					muteBtn.addEventListener('click', () => setMuted(!muted));
+					applyMuteUI(); // Initialize UI
+				}
 
 				img.addEventListener('animationend', (e) => {
 					if (e.animationName === 'bounceOpen') {
