@@ -310,8 +310,14 @@
 						}
 
 					});
-					socket.on('actionRejected', ({ reason }) => {
-						console.warn('Action rejected:', reason);
+					socket.on('actionRejected', ({ reason, retryAfter }) => {
+						console.warn('Action rejected:', reason, retryAfter);
+						if (reason === 'cooldown') {
+							// Disable button until cooldown over to reflect server rule
+							btn.disabled = true;
+							btn.style.opacity = '0.7';
+							setTimeout(() => { btn.disabled = false; btn.style.opacity = ''; }, Math.max(0, retryAfter || 1000));
+						}
 					});
 				}
 

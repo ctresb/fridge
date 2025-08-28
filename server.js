@@ -17,6 +17,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data.json');
+const CLICK_COOLDOWN_MS = Number(process.env.COOLDOWN_MS || 1000);
 
 /** @typedef {{
  *  isOpen: boolean,
@@ -127,8 +128,26 @@ io.on('connection', (socket) => {
   // Send current state to the new client
   socket.emit('state', publicState());
 
+  // simple per-socket cooldown
+  function checkCooldown() {
+    const now = Date.now();
+    const last = socket.data.lastRequestAt || 0;
+    const elapsed = now - last;
+    const remaining = CLICK_COOLDOWN_MS - elapsed;
+    if (remaining > 0) {
+      return remaining;
+    }
+    socket.data.lastRequestAt = now;
+    return 0;
+  }
+
   // Client requests to toggle
   socket.on('requestToggle', () => {
+    const remaining = checkCooldown();
+    if (remaining > 0) {
+      socket.emit('actionRejected', { reason: 'cooldown', retryAfter: remaining });
+      return;
+    }
     if (state.isOpen) {
       const ok = closeFridge();
       if (!ok) socket.emit('actionRejected', { reason: 'already-closed' });
@@ -140,10 +159,20 @@ io.on('connection', (socket) => {
 
   // Explicit open/close APIs if the client wants to be explicit
   socket.on('requestOpen', () => {
+    const remaining = checkCooldown();
+    if (remaining > 0) {
+      socket.emit('actionRejected', { reason: 'cooldown', retryAfter: remaining });
+      return;
+    }
     const ok = openFridge();
     if (!ok) socket.emit('actionRejected', { reason: 'already-open' });
   });
   socket.on('requestClose', () => {
+    const remaining = checkCooldown();
+    if (remaining > 0) {
+      socket.emit('actionRejected', { reason: 'cooldown', retryAfter: remaining });
+      return;
+    }
     const ok = closeFridge();
     if (!ok) socket.emit('actionRejected', { reason: 'already-closed' });
   });
