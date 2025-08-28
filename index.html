@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>The Fridge</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Jersey+10&display=swap" rel="stylesheet">
+		<style>
+			:root {
+				--fg: #0f172a; /* slate-900 */
+				--muted: #475569; /* slate-600 */
+				--accent: #22c55e; /* green-500 */
+			}
+
+			* { box-sizing: border-box; font-family: "Jersey 10", sans-serif;}
+			html, body { height: 100%; }
+			body {
+				margin: 0;
+				color: var(--fg);
+				background: #f8fafc;
+				display: grid;
+				place-items: center;
+			}
+
+			.wrap {
+				width: min(680px, 92vw);
+				text-align: center;
+				padding: 24px 16px 40px;
+			}
+
+			h1 {
+				margin: 0 0 8px;
+				font-size: clamp(30px, 3.5vw, 28px);
+				font-weight: 700;
+			}
+			p.sub {
+				margin: 0 0 25px;
+				color: var(--muted);
+				font-size: clamp(23px, 3vw, 15px);
+			}
+
+			.panel {
+				display: grid;
+				gap: 14px;
+				justify-items: center;
+			}
+
+
+			.fridge-btn {
+				appearance: none;
+				border: none;
+				background: none;
+                margin-left: 50px;
+                margin-bottom: -20px;
+				padding: 0;
+				cursor: pointer;
+				line-height: 0;
+				user-select: none;
+				-webkit-tap-highlight-color: transparent;
+				width: clamp(180px, 60vw, 420px);
+				filter: drop-shadow(0 10px 18px rgba(0,0,0,0.10));
+			}
+
+            .fridge-img {
+                display: block;
+                width: 100%;
+                height: auto;
+                filter: none;
+                /* make it pixel perfect */
+                image-rendering: -webkit-optimize-contrast;
+                image-rendering: -moz-crisp-edges;
+                image-rendering: crisp-edges;
+                image-rendering: pixelated;
+                
+                border-radius: 14px;
+                transition: transform 300ms ease, filter 300ms ease;
+                transform-origin: center bottom;
+            }
+
+			.fridge-btn:active .fridge-img { transform: scale(0.985); }
+
+			/* subtle state styling */
+
+			/* Bounce animation when opening */
+			@keyframes bounceOpen {
+				0%   { transform: translateY(0) scale(0.96); }
+				45%  { transform: translateY(-10px) scale(1.03); }
+				75%  { transform: translateY(2px) scale(0.995); }
+				100% { transform: translateY(0) scale(1); }
+			}
+			.bounce {
+				animation: bounceOpen 500ms cubic-bezier(.22,1.28,.23,1);
+			}
+
+			.stats {
+				display: flex;
+                flex-direction: column;
+				gap: 10px;
+				align-items: center;
+				justify-content: center;
+				font-variant-numeric: tabular-nums;
+			}
+			.badge {
+				background: rgba(255, 255, 255, 0);
+                width: 100%;
+				border: 1px solid rgb(239, 242, 244);
+				border-radius: 5px;
+				padding: 8px 12px;
+				box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+				font-size: clamp(23px, 2.8vw, 14px);
+                font-weight: 100;
+			}
+
+			.hint { color: var(--muted); font-size: 22px; margin-top: 2px; }
+
+			/* Respect reduced motion */
+			@media (prefers-reduced-motion: reduce) {
+				.fridge-img { transition: none; }
+				.bounce { animation: none !important; }
+			}
+		</style>
+		<script src="/socket.io/socket.io.js"></script>
+	</head>
+	<body>
+		<main class="wrap">
+			<h1>The Fridge</h1>
+			<p class="sub">Tap the fridge to open/close. Tracks clicks and total time left open.</p>
+
+			<section class="panel">
+				<button id="fridgeBtn" class="fridge-btn" aria-pressed="false" aria-label="Open fridge">
+					<img id="fridgeImg" class="fridge-img" src="closed.png" alt="Fridge closed" />
+				</button>
+
+				<div class="stats">
+					<div class="badge" id="clicks">Clicks: 0</div>
+					<div class="badge" id="openTime">Open time: 00:00:00</div>
+					<div class="badge" id="state">State: Closed</div>
+				</div>
+				<div class="hint">Open time accumulates and pauses when closed.</div>
+
+
+			</section>
+		</main>
+
+		<script>
+			(function() {
+				const socket = window.io ? window.io() : null;
+				const btn = document.getElementById('fridgeBtn');
+				const img = document.getElementById('fridgeImg');
+				const clicksEl = document.getElementById('clicks');
+				const openTimeEl = document.getElementById('openTime');
+				const stateEl = document.getElementById('state');
+
+				// Volume settings (0.0 to 1.0)
+				const VOLUME_OPEN = 0.8;
+				const VOLUME_CLOSE = 0.8;
+				const VOLUME_BUZZ = 0.05;
+
+				// Sounds
+				const openSnd = new Audio('open.mp3');
+				const closeSnd = new Audio('close.mp3');
+				openSnd.preload = 'auto';
+				closeSnd.preload = 'auto';
+				openSnd.volume = VOLUME_OPEN;
+				closeSnd.volume = VOLUME_CLOSE;
+
+				// Web Audio context for smoother, crossfaded buzz loop
+				const BUZZ_CROSSFADE = 0.12; // seconds of overlap to blend seams
+				let audioCtx = null;
+				let buzzBuffer = null;
+				const buzzActiveSources = new Set();
+
+				async function ensureAudioCtx() {
+					if (!audioCtx) {
+						audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+					}
+					if (audioCtx.state === 'suspended') {
+						try { await audioCtx.resume(); } catch (_) {}
+					}
+				}
+
+				async function loadBuzzBuffer() {
+					if (buzzBuffer) return;
+					const res = await fetch('buzz.mp3');
+					const arr = await res.arrayBuffer();
+					buzzBuffer = await new Promise((resolve, reject) => {
+						audioCtx.decodeAudioData(arr, resolve, reject);
+					});
+				}
+
+				function scheduleBuzzCycle(atTime) {
+					if (!buzzBuffer || !audioCtx) return;
+					const src = audioCtx.createBufferSource();
+					src.buffer = buzzBuffer;
+					const gain = audioCtx.createGain();
+					gain.gain.setValueAtTime(0, atTime);
+					gain.gain.linearRampToValueAtTime(VOLUME_BUZZ, atTime + BUZZ_CROSSFADE);
+					const endTime = atTime + buzzBuffer.duration;
+					gain.gain.setValueAtTime(VOLUME_BUZZ, endTime - BUZZ_CROSSFADE);
+					gain.gain.linearRampToValueAtTime(0, endTime);
+
+					src.connect(gain);
+					gain.connect(audioCtx.destination);
+					src.start(atTime);
+					buzzActiveSources.add(src);
+					src.onended = () => buzzActiveSources.delete(src);
+
+					const nextStart = endTime - BUZZ_CROSSFADE;
+					const delayMs = Math.max(0, (nextStart - audioCtx.currentTime - 0.05) * 1000);
+					setTimeout(() => scheduleBuzzCycle(nextStart), delayMs);
+				}
+
+				async function startBuzzLoop() {
+					await ensureAudioCtx();
+					await loadBuzzBuffer();
+					const startAt = audioCtx.currentTime + 0.02;
+					scheduleBuzzCycle(startAt);
+				}
+
+				let isOpen = false;
+				let clicks = 0;
+				let totalOpenMs = 0;
+				let openedAt = null; // server timestamp
+				let ticker = null;
+				let buzzStarted = false;
+
+				function formatHMS(ms) {
+					const totalSec = Math.floor(ms / 1000);
+					const h = Math.floor(totalSec / 3600);
+					const m = Math.floor((totalSec % 3600) / 60);
+					const s = totalSec % 60;
+					const pad = n => String(n).padStart(2, '0');
+					return `${pad(h)}:${pad(m)}:${pad(s)}`;
+				}
+
+				function updateTimerDisplay() {
+					const liveMs = isOpen && openedAt ? (Date.now() - openedAt) : 0;
+					const ms = totalOpenMs + liveMs;
+					openTimeEl.textContent = `Open time: ${formatHMS(ms)}`;
+				}
+
+				function startTicker() {
+					if (ticker) return;
+					ticker = setInterval(updateTimerDisplay, 500);
+				}
+
+				function stopTicker() {
+					if (!ticker) return;
+					clearInterval(ticker);
+					ticker = null;
+				}
+
+				function openFridge() {
+					img.src = 'open.png';
+					img.alt = 'Fridge open';
+					btn.classList.add('is-open');
+					img.classList.remove('bounce');
+					void img.offsetWidth;
+					img.classList.add('bounce');
+					btn.setAttribute('aria-pressed', 'true');
+					btn.setAttribute('aria-label', 'Close fridge');
+					stateEl.textContent = 'State: Open';
+					try { openSnd.currentTime = 0; openSnd.play().catch(()=>{}); } catch(_) {}
+					startTicker();
+					updateTimerDisplay();
+				}
+
+				function closeFridge() {
+					img.src = 'closed.png';
+					img.alt = 'Fridge closed';
+					btn.classList.remove('is-open');
+					btn.setAttribute('aria-pressed', 'false');
+					btn.setAttribute('aria-label', 'Open fridge');
+					stateEl.textContent = 'State: Closed';
+					try { closeSnd.currentTime = 0; closeSnd.play().catch(()=>{}); } catch(_) {}
+					stopTicker();
+					updateTimerDisplay();
+				}
+
+				btn.addEventListener('click', () => {
+					if (!buzzStarted) {
+						buzzStarted = true;
+						startBuzzLoop();
+					}
+					if (socket) socket.emit('requestToggle');
+				});
+
+				img.addEventListener('animationend', (e) => {
+					if (e.animationName === 'bounceOpen') {
+						img.classList.remove('bounce');
+					}
+				});
+
+				if (socket) {
+					socket.on('state', (s) => {
+						const nextIsOpen = !!s.isOpen;
+						clicks = Number(s.clicks) || 0;
+						totalOpenMs = Number(s.totalOpenMs) || 0;
+						openedAt = s.openedAt != null ? Number(s.openedAt) : null;
+						clicksEl.textContent = `Clicks: ${clicks}`;
+						if (nextIsOpen !== isOpen) {
+							isOpen = nextIsOpen;
+							if (isOpen) openFridge(); else closeFridge();
+						} else {
+							// Just refresh timer/state text
+							stateEl.textContent = `State: ${isOpen ? 'Open' : 'Closed'}`;
+							updateTimerDisplay();
+						}
+
+					});
+					socket.on('actionRejected', ({ reason }) => {
+						console.warn('Action rejected:', reason);
+					});
+				}
+
+				updateTimerDisplay();
+			})();
+		</script>
+	</body>
+	</html>
+
